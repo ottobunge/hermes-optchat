@@ -1,0 +1,3 @@
+name: optchat
+version: 0.2.0
+description: "Opt-in OptChat context engine: durable ROOT/tree, bounded settled view, zoom/date, and media sidecars; transactional outbox and cache marks require the integrated Hermes core checkout."
