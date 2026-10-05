@@ -6,6 +6,7 @@ takes ``self._lock``; summarizer calls run on worker threads outside the lock.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 import time
@@ -193,7 +194,7 @@ class Memory:
     def _start(self, l: int, i: int) -> None:
         self.busy.add((l, i))
         request = self._request(l, i)
-        threading.Thread(target=self._job, args=(l, i, request), daemon=True,
+        threading.Thread(target=contextvars.copy_context().run, args=(self._job, l, i, request), daemon=True,
                          name=f"optchat-node-{l}-{i}").start()
 
     def _job(self, l: int, i: int, request: dict) -> None:
@@ -209,7 +210,8 @@ class Memory:
                     return
                 # Stay busy for RETRY, then try again, forever. No exponential backoff:
                 # the next turn waits for these summaries.
-                timer = threading.Timer(self.retry, self._retry, args=(l, i))
+                timer = threading.Timer(self.retry, contextvars.copy_context().run,
+                                        args=(self._retry, l, i))
                 timer.daemon = True
                 self._timers.add(timer)
                 timer.start()

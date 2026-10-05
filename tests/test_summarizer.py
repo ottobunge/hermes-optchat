@@ -1,10 +1,12 @@
 import json
 import sys
 import textwrap
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from optchat.summarizer import CLAUDE_CODE_ARGV, CommandSummarizer, SummarizerError, from_env
+from optchat.summarizer import CLAUDE_CODE_ARGV, CommandSummarizer, HermesSummarizer, SummarizerError, from_env
 
 ECHO_JSON = textwrap.dedent("""
     import json, os, sys
@@ -94,11 +96,109 @@ def _record_summary_error(summarizer, errors):
     except Exception as exc:
         errors.append(exc)
 
+def test_default_uses_host_auxiliary_backend_without_a_model_call():
+    from optchat.summarizer import HermesSummarizer
+
+    summarizer = from_env({})
+    assert isinstance(summarizer, HermesSummarizer)
+    assert summarizer.task == "optchat"
+
+
+def test_hermes_backend_sends_all_turns_through_optchat_task():
+    with (patch("hermes_cli.config.load_config_readonly", return_value={}),
+          patch("agent.auxiliary_client.call_llm", return_value=SimpleNamespace(
+              choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))])) as call):
+        messages = [{"role": "user", "content": [{"type": "text", "text": "<chat/>"}]},
+                    {"role": "assistant", "content": "old attempt"},
+                    {"role": "user", "content": "try again"}]
+        result = from_env({})("system prompt", messages)
+    assert result == "summary"
+    assert call.call_args.kwargs == {
+        "task": "optchat", "provider": "openai-codex", "model": "gpt-6-luna",
+        "fallback_policy": "task_chain_only",
+        "messages": [{"role": "system", "content": "system prompt"}, *messages],
+        "timeout": 300.0,
+    }
+
+
+def test_auxiliary_config_overrides_provider_model_and_timeout():
+    config = {"auxiliary": {"optchat": {"provider": "openrouter", "model": "vendor/fast",
+                                        "timeout": 44}}}
+    with (patch("hermes_cli.config.load_config_readonly", return_value=config),
+          patch("agent.auxiliary_client.call_llm", return_value=SimpleNamespace(
+              choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])) as call):
+        assert from_env({})("S", [{"role": "user", "content": "hi"}]) == "ok"
+    assert call.call_args.kwargs["provider"] == "openrouter"
+    assert call.call_args.kwargs["model"] == "vendor/fast"
+    assert call.call_args.kwargs["timeout"] == 44
+    assert call.call_args.kwargs["fallback_policy"] == "task_chain_only"
+
+
+def test_process_timeout_takes_precedence_over_auxiliary_task_timeout():
+    with (patch("hermes_cli.config.load_config_readonly", return_value={
+              "auxiliary": {"optchat": {"timeout": 44}}}),
+          patch("agent.auxiliary_client.call_llm", return_value=SimpleNamespace(
+              choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])) as call):
+        summarizer = from_env({"OPTCHAT_SUMMARIZER_TIMEOUT": "12"})
+        assert summarizer("S", [{"role": "user", "content": "hi"}]) == "ok"
+    assert call.call_args.kwargs["timeout"] == 12
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("provider failed"), TimeoutError("timed out")])
+def test_hermes_backend_propagates_provider_and_timeout_errors(failure):
+    with (patch("hermes_cli.config.load_config_readonly", return_value={}),
+          patch("agent.auxiliary_client.call_llm", side_effect=failure)):
+        with pytest.raises(type(failure), match=str(failure)):
+            from_env({})("S", [{"role": "user", "content": "text"}])
+
+
+def test_hermes_backend_rejects_empty_model_output():
+    with (patch("hermes_cli.config.load_config_readonly", return_value={}),
+          patch("agent.auxiliary_client.call_llm", return_value=SimpleNamespace(
+              choices=[SimpleNamespace(message=SimpleNamespace(content=None))]))):
+        with pytest.raises(SummarizerError, match="empty"):
+            from_env({})("S", [{"role": "user", "content": "text"}])
+
+
+def test_hermes_backend_close_prevents_new_calls():
+    summarizer = from_env({})
+    summarizer.close()
+    with patch("agent.auxiliary_client.call_llm") as call:
+        with pytest.raises(SummarizerError, match="closed"):
+            summarizer("S", [{"role": "user", "content": "text"}])
+    call.assert_not_called()
+
+
+def test_hermes_backend_close_discards_in_flight_output():
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    errors = []
+
+    def blocked(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="late summary"))])
+
+    summarizer = from_env({})
+    with (patch("hermes_cli.config.load_config_readonly", return_value={}),
+          patch("agent.auxiliary_client.call_llm", side_effect=blocked)):
+        thread = threading.Thread(target=_record_summary_error, args=(summarizer, errors))
+        thread.start()
+        try:
+            assert entered.wait(3)
+            summarizer.close()
+        finally:
+            release.set()
+            thread.join(3)
+    assert not thread.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], SummarizerError)
+
 
 def test_from_env(monkeypatch, tmp_path):
     monkeypatch.delenv("OPTCHAT_SUMMARIZER", raising=False)
     monkeypatch.delenv("OPTCHAT_SUMMARIZER_CMD", raising=False)
-    assert from_env() is None
+    assert isinstance(from_env(), HermesSummarizer)
     monkeypatch.setenv("OPTCHAT_SUMMARIZER", "claude-code")
     s = from_env()
     assert s.argv[0] == "claude" and "--tools" in s.argv and s.input_format == "text"
@@ -113,3 +213,14 @@ def test_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OPTCHAT_SUMMARIZER_CMD", "python3 x.py; rm -rf /")
     with pytest.raises(ValueError):
         from_env()
+
+
+@pytest.mark.parametrize("selection", ["none", "off"])
+def test_explicit_none_disables_even_a_configured_command(selection):
+    assert from_env({"OPTCHAT_SUMMARIZER": selection,
+                     "OPTCHAT_SUMMARIZER_CMD": '["python3","worker.py"]'}) is None
+
+
+def test_explicit_hermes_backend_ignores_command_override():
+    assert isinstance(from_env({"OPTCHAT_SUMMARIZER": "hermes",
+                                "OPTCHAT_SUMMARIZER_CMD": '["python3","worker.py"]'}), HermesSummarizer)

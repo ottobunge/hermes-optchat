@@ -43,6 +43,48 @@ def test_close_stops_the_compactor_backend(chat_dir):
     assert backend.closed
 
 
+def test_compactor_worker_inherits_profile_scope(make, tmp_path):
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    home = tmp_path / "isolated-profile"
+    observed = []
+
+    def summarize(system, messages):
+        observed.append(get_hermes_home())
+        return "summary"
+
+    token = set_hermes_home_override(home)
+    try:
+        memory = make(summarize)
+        memory.log("user", "x" * 1000)
+        assert memory.settle(5)
+    finally:
+        reset_hermes_home_override(token)
+    assert observed == [home]
+
+
+def test_retry_worker_retains_profile_scope(make, tmp_path):
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    home = tmp_path / "isolated-profile"
+    observed = []
+
+    def summarize(system, messages):
+        observed.append(get_hermes_home())
+        if len(observed) == 1:
+            raise RuntimeError("retry once")
+        return "summary"
+
+    token = set_hermes_home_override(home)
+    try:
+        memory = make(summarize, retry=0.01)
+        memory.log("user", "x" * 1000)
+        assert memory.settle(5)
+    finally:
+        reset_hermes_home_override(token)
+    assert observed == [home, home]
+
+
 def test_short_messages_are_free_nodes_and_view_is_verbatim(make):
     m = make()
     m.log("user", "hello")

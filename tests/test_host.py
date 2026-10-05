@@ -19,7 +19,7 @@ def hermes_home(tmp_path, monkeypatch):
     (home / "plugins").mkdir(parents=True)
     os.symlink(PKG, home / "plugins" / "optchat")
     monkeypatch.setenv("HERMES_HOME", str(home))
-    for k in ("OPTCHAT_SUMMARIZER", "OPTCHAT_SUMMARIZER_CMD", "OPTCHAT_HOME"):
+    for k in ("OPTCHAT_SUMMARIZER_CMD", "OPTCHAT_HOME"):
         monkeypatch.delenv(k, raising=False)
     # the host imports user engines under its own namespace: start clean each test
     for name in [m for m in sys.modules if m.startswith("_hermes_user_context_engine")]:
@@ -53,6 +53,56 @@ def test_never_auto_activated(hermes_home):
     assert _select_context_engine({"context": {"engine": "compressor"}}) is None
     picked = _select_context_engine({"context": {"engine": "optchat"}})
     assert picked is not None and picked.name == "optchat"
+
+
+def test_general_plugin_registration_exposes_optchat_auxiliary_task(hermes_home):
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from optchat import register
+
+    manager = PluginManager()
+    ctx = PluginContext(PluginManifest(name="optchat"), manager)
+    register(ctx)
+    assert manager._aux_tasks["optchat"]["plugin"] == "optchat"
+    assert manager._aux_tasks["optchat"]["defaults"]["provider"] == "openai-codex"
+    assert manager._aux_tasks["optchat"]["defaults"]["model"] == "gpt-6-luna"
+    assert manager._context_engine.name == "optchat"
+
+
+def test_enabled_plugin_task_survives_context_loader_and_clone(hermes_home):
+    from hermes_cli.plugins import get_plugin_auxiliary_tasks
+    from plugins.context_engine import load_context_engine
+
+    (hermes_home / "config.yaml").write_text("plugins:\n  enabled: [optchat]\n")
+    engine = load_context_engine("optchat")
+    assert engine is not None
+    tasks = {entry["key"]: entry for entry in get_plugin_auxiliary_tasks()}
+    assert tasks["optchat"]["plugin"] == "optchat"
+    from agent.auxiliary_client import _get_auxiliary_task_config
+    route = _get_auxiliary_task_config("optchat")
+    assert (route["provider"], route["model"], route["timeout"]) == ("openai-codex", "gpt-6-luna", 300.0)
+    clone = engine.clone_for_agent()
+    assert clone is not engine
+    assert clone._summarizer is engine._summarizer
+    assert clone._turn is None
+    assert not (hermes_home / "optchat").exists()
+
+
+def test_default_backend_compacts_a_real_engine_node_without_network(hermes_home, monkeypatch):
+    from plugins.context_engine import load_context_engine
+
+    monkeypatch.setenv("OPTCHAT_SUMMARIZER", "hermes")
+    engine = load_context_engine("optchat")
+    assert engine is not None
+    engine.on_session_start("compaction-session", hermes_home=str(hermes_home))
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="short summary"))])
+    with patch("agent.auxiliary_client.call_llm", return_value=response) as call:
+        memory = engine._memory()
+        memory.log("user", "private test message " * 80)
+        assert memory.settle(5)
+        assert memory.store.node(0, 0) == "short summary"
+    assert call.call_count == 1
+    assert call.call_args.kwargs["task"] == "optchat"
+    assert call.call_args.kwargs["provider"] == "openai-codex"
 
 
 class StubAgent:

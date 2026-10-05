@@ -7,9 +7,18 @@ This module exports exactly one ContextEngine subclass, ``OptChatEngine``, plus
 """
 
 from .engine import OptChatEngine
+from .summarizer import DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_TIMEOUT, TASK
 
 __all__ = ["OptChatEngine", "register"]
 
 
 def register(ctx):
+    # The directory context-engine collector has only register_context_engine; the
+    # general plugin context additionally offers an owned auxiliary task slot.
+    if hasattr(ctx, "register_auxiliary_task"):
+        ctx.register_auxiliary_task(
+            TASK, display_name="OptChat compactor", description="Summarize OptChat tree nodes",
+            defaults={"provider": DEFAULT_PROVIDER, "model": DEFAULT_MODEL,
+                      "timeout": DEFAULT_TIMEOUT},
+        )
     ctx.register_context_engine(OptChatEngine())

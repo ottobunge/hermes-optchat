@@ -4,7 +4,11 @@ A summarizer is any callable ``(system: str, messages: list[dict]) -> str`` wher
 ``messages`` is a chat in OpenAI shape (user / assistant turns; the first user turn holds
 two text blocks: the ``<chat>`` context and the step). Tests use in-process fakes.
 
-``CommandSummarizer`` runs a user-configured local command:
+``HermesSummarizer`` is the default: one host auxiliary-client call on task ``optchat``.
+Directory context-engine discovery supplies a minimal collector without ``ctx.llm``, so
+this backend uses the host auxiliary API directly and never starts another Hermes agent.
+
+``CommandSummarizer`` runs an explicitly configured local command:
 
 * argv list only, never a shell (``shell=False``); ``"{system}"`` as a whole argv element is
   replaced by the system prompt; nothing else is interpolated;
@@ -40,10 +44,50 @@ CLAUDE_CODE_ARGV = [
 ]
 
 _FORBIDDEN = {"hermes", "hermes-agent", "hermes_agent"}
+DEFAULT_PROVIDER = "openai-codex"
+DEFAULT_MODEL = "gpt-6-luna"
+TASK = "optchat"
 
 
 class SummarizerError(RuntimeError):
     pass
+
+
+class HermesSummarizer:
+    """Host-owned auxiliary model route; no recursive agent process."""
+
+    task = TASK
+
+    def __init__(self, *, timeout: float | None = None):
+        self.timeout = float(timeout) if timeout is not None else None
+        self._closed = threading.Event()
+
+    def close(self) -> None:
+        self._closed.set()
+
+    def __call__(self, system: str, messages) -> str:
+        if self._closed.is_set():
+            raise SummarizerError("summarizer is closed")
+        from agent.auxiliary_client import call_llm
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly()
+        auxiliary = config.get("auxiliary", {}) if isinstance(config, dict) else {}
+        configured = auxiliary.get(TASK, {}) if isinstance(auxiliary, dict) else {}
+        configured = configured if isinstance(configured, dict) else {}
+        response = call_llm(task=TASK,
+                            provider=configured.get("provider", DEFAULT_PROVIDER),
+                            model=configured.get("model", DEFAULT_MODEL),
+                            fallback_policy="task_chain_only",
+                            messages=[{"role": "system", "content": system}, *messages],
+                            timeout=self.timeout if self.timeout is not None else
+                            float(configured.get("timeout") or DEFAULT_TIMEOUT))
+        if self._closed.is_set():
+            raise SummarizerError("summarizer is closed")
+        text = response.choices[0].message.content
+        if not isinstance(text, str) or not text.strip():
+            raise SummarizerError("summarizer returned empty model output")
+        return text
 
 
 def _text(content) -> str:
@@ -128,16 +172,19 @@ class CommandSummarizer:
 
 
 def from_env(env=None):
-    """Build the summarizer from the environment, or None when none is configured.
+    """Build the summarizer from the environment (Hermes auxiliary route by default).
 
+    OPTCHAT_SUMMARIZER=hermes            Hermes auxiliary task ``optchat`` (default)
+    OPTCHAT_SUMMARIZER=none|off          Explicitly disable model compaction
     OPTCHAT_SUMMARIZER=claude-code       Claude Code CLI preset (model: OPTCHAT_SUMMARIZER_MODEL,
                                          default "sonnet")
     OPTCHAT_SUMMARIZER_CMD='["argv",..]' any local command, JSON argv list (never a shell string)
     OPTCHAT_SUMMARIZER_INPUT=json|text   stdin format for OPTCHAT_SUMMARIZER_CMD (default json)
-    OPTCHAT_SUMMARIZER_TIMEOUT=seconds   per call (default 300)
+    OPTCHAT_SUMMARIZER_TIMEOUT=seconds   per call (default 300; overrides auxiliary.optchat.timeout)
     """
     env = os.environ if env is None else env
-    timeout = float(env.get("OPTCHAT_SUMMARIZER_TIMEOUT") or DEFAULT_TIMEOUT)
+    raw_timeout = env.get("OPTCHAT_SUMMARIZER_TIMEOUT")
+    timeout = float(raw_timeout or DEFAULT_TIMEOUT)
     preset = (env.get("OPTCHAT_SUMMARIZER") or "").strip().lower()
     if preset in ("claude-code", "claude"):
         argv = list(CLAUDE_CODE_ARGV)
@@ -145,11 +192,15 @@ def from_env(env=None):
         if model:
             argv[argv.index("--model") + 1] = model
         return CommandSummarizer(argv, timeout=timeout, input_format="text")
-    if preset not in ("", "none", "off"):
+    if preset in ("none", "off"):
+        return None
+    if preset in ("hermes", "hermes-native"):
+        return HermesSummarizer(timeout=timeout if raw_timeout else None)
+    if preset:
         raise ValueError(f"unknown OPTCHAT_SUMMARIZER preset {preset!r}")
     raw = env.get("OPTCHAT_SUMMARIZER_CMD")
     if not raw:
-        return None
+        return HermesSummarizer(timeout=timeout if raw_timeout else None)
     try:
         argv = json.loads(raw)
     except ValueError:
