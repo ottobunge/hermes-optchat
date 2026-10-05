@@ -20,12 +20,13 @@ An opt-in Hermes `ContextEngine` plugin inspired by Victor Taelin's [OptChat spe
 Copy or symlink the **`optchat/` directory**, not the repository root, to `$HERMES_HOME/plugins/optchat`. For the default profile:
 
 ```sh
-ln -s /home/otto/dev/hermes-optchat/optchat ~/.hermes/plugins/optchat
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins"
+ln -s /path/to/hermes-optchat/optchat "${HERMES_HOME:-$HOME/.hermes}/plugins/optchat"
 ```
 
 The source directory may be elsewhere; adjust the path. This is a context-engine plugin, not a desktop UI plugin; it does **not** need `plugins.enabled`. **The released Hermes executable does not include this checkout's core seams.** Run the integrated source checkout (or build/install a package containing it) as well as linking the plugin; otherwise the plugin falls back to best-effort legacy mode. For an isolated test, create a dedicated `HERMES_HOME`, link `plugins/optchat` there, authenticate that profile on-device, then set `context.engine` using `HERMES_HOME=<test-home> hermes config set context.engine optchat`. Run the integrated source with `PYTHONPATH=<hermes-core-checkout>:<optchat-repo> HERMES_HOME=<test-home> <core-test-venv>/bin/python -m hermes_cli.main chat ...`. **Do not flip an active gateway/profile that is serving important sessions:** configuration may be picked up by new sessions. No existing session history is imported automatically.
 
-A configured model summarizer is necessary to summarize material above 512 UTF-8 bytes. With none set, free short nodes work but a longer history cannot settle. The recommended preset uses your authenticated Claude Code CLI with Sonnet, no tools, no project settings and no persistent CLI session:
+A configured model summarizer is necessary to summarize material above 512 UTF-8 bytes. With none set, free short nodes work but a longer history cannot settle. The optional preset uses your authenticated Claude Code CLI with Sonnet, no tools, no project settings and no persistent CLI session:
 
 ```sh
 export OPTCHAT_SUMMARIZER=claude-code
@@ -39,9 +40,8 @@ Data goes under `$HERMES_HOME/optchat/chat/{main,tree}/YYYY-MM-DD.jsonl` and `ch
 ## Tests
 
 ```sh
-PYTHONPATH=/home/otto/dev/hermes-agent-upstream:/home/otto/dev/hermes-optchat \
-  /home/otto/.hermes/cache/scratch/optchat-gateway-venv/bin/python -m pytest -q \
-  /home/otto/dev/hermes-optchat/tests
+PYTHONPATH=/path/to/hermes-agent:/path/to/hermes-optchat \
+  python -m pytest -q /path/to/hermes-optchat/tests
 ```
 
 `tests/test_outbox.py` needs a host with the durable outbox (it skips otherwise). Tests use temporary chat directories and databases and fake summarizers; no user sessions or paid model calls. Replace the paths and Python interpreter as appropriate. The plugin itself only needs Python stdlib and the host's `agent.context_engine`.
