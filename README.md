@@ -2,7 +2,7 @@
 
 An opt-in Hermes `ContextEngine` plugin inspired by Victor Taelin's [OptChat specification](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449). Each profile has one durable chat directory. It keeps a separate append-only log and binary summary tree, constructs an incrementally coarsened view, starts each turn with that view rather than the earlier Hermes transcript, and exposes `zoom(id, n)` / `date(id)`.
 
-**Development build, not yet a released or default Hermes feature.** The companion Hermes core checkout adds a transactional event outbox, fail-closed context selection, and opt-in Anthropic/OpenAI Responses cache planning. The plugin remains disabled in the user's active profile. Do not switch important existing chats to this unmerged build; Hermes's native transcript and the OptChat directory both need secure backups. See the remaining parity limits below.
+**Development build, not yet a released or default Hermes feature.** The companion [Hermes core integration branch](https://github.com/ottobunge/hermes-agent/tree/feat/optchat-integration) adds a transactional event outbox, fail-closed context selection, and opt-in Anthropic/OpenAI Responses cache planning. The plugin remains disabled in the user's active profile. Do not switch important existing chats to this unmerged build; Hermes's native transcript and the OptChat directory both need secure backups. See the remaining parity limits below.
 
 ## Roadmap and status
 
